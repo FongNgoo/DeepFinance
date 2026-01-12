@@ -1,3 +1,4 @@
+#model.py
 import torch
 from torch import nn
 from sklearn.metrics import accuracy_score, matthews_corrcoef
@@ -53,7 +54,7 @@ class StockMovementModel(nn.Module):
 
         self.device = device
 
-    def forward(self, s_o, s_h, s_c, s_m, label=None, mode="train"):
+    def forward(self, s_o, s_h, s_c, s_m, s_n, label=None, mode="train"):
         """
         Inputs:
         - s_o, s_h, s_c : (B, T, 1)
@@ -63,12 +64,13 @@ class StockMovementModel(nn.Module):
         """
 
         # ===== 1. Multimodal Encoding =====
-        v_m, v_i = self.multimodal_encoder(s_o, s_h, s_c, s_m)
+        v_m, v_i, v_n = self.multimodal_encoder(s_o, s_h, s_c, s_m, s_n)
         # v_m, v_i : (B, T, dim)
 
         # ===== 2. Cross-attention Fusion =====
         fused_features, _ = self.cross_attention(v_i, v_m)
         # fused_features : (B, T, dim)
+        fused_features, _ = self.cross_attention(fused_features, v_n)
 
         # ===== 3. Prediction Head =====
         output_score = self.movement_predictor(

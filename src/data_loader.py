@@ -1,7 +1,7 @@
+# src/data_loader.py
 import pandas as pd
 import numpy as np
 import torch
-from sklearn.preprocessing import StandardScaler
 
 
 class data_prepare:
@@ -40,62 +40,103 @@ class data_prepare:
         # LOAD DATA
         # ==========================
         Data = pd.read_pickle(self.data_path)
+        rows = {}
 
-        df = pd.DataFrame({
-            d: {
-                **content["price"][stock_name],
-                **content["macro"],
+        for d, content in Data.items():
+            if stock_name not in content["price"]:
+                continue
+
+            price = content["price"][stock_name]
+            macro = content["macro"]
+
+            news_vec = np.asarray(
+                content["news"].get(stock_name, np.zeros(1024)),
+                dtype=np.float32
+            )
+
+            news = {f"news_{i}": v for i, v in enumerate(news_vec)}
+
+            rows[d] = {
+                **price,
+                **macro,
+                **news
             }
-            for d, content in Data.items()
-        }).T
 
+        df = pd.DataFrame.from_dict(rows, orient="index")
+        df.sort_index(inplace=True)
+
+        # ==========================
+        # SPLIT MODALITIES
+        # ==========================
         price_df = df[["open", "high", "close"]]
+
         macro_df = df[
             ["vix", "yield_spread_10y_2y",
              "sp500", "sp500_return", "dxy", "wti"]
         ]
+
+        news_cols = [c for c in df.columns if c.startswith("news_")]
+        news_df = df[news_cols]
+        news_df = news_df.apply(pd.to_numeric, errors="coerce")
+        news_df = news_df.fillna(0.0)
 
         # ==========================
         # RETURN (PAST RETURN – GIỮ NGUYÊN)
         # ==========================
         return_df = self.create_return(price_df)
 
-        # align
+        # ALIGN STEP 1: theo return
         price_df = price_df.loc[return_df.index]
         macro_df = macro_df.loc[return_df.index]
+        news_df  = news_df.loc[return_df.index]
 
         # ==========================
-        # NORMALIZATION
+        # PRICE INPUT: LOG-RETURN
         # ==========================
-        # price: log-return (INPUT)
         price_df = np.log(price_df / price_df.shift(1))
         price_df.dropna(inplace=True)
 
-        macro_df = macro_df.loc[price_df.index]
+        # 🔑 ALIGN STEP 2 (QUAN TRỌNG NHẤT)
+        macro_df  = macro_df.loc[price_df.index]
+        news_df   = news_df.loc[price_df.index]
         return_df = return_df.loc[price_df.index]
 
-        # macro clean
+        # ==========================
+        # MACRO CLEAN
+        # ==========================
         macro_df = macro_df.replace([np.inf, -np.inf], np.nan)
-        macro_df = macro_df.fillna(method="ffill").fillna(method="bfill")
+        macro_df = macro_df.ffill().bfill()
+
+        # ==========================
+        # FINAL SAFETY CHECK
+        # ==========================
+        assert len(price_df) == len(macro_df) == len(news_df) == len(return_df), \
+            "❌ Modality length mismatch before windowing"
 
         # ==========================
         # NUMPY
         # ==========================
-        price_np = price_df.values
-        macro_np = macro_df.values
-        return_np = return_df.values  # (T, 1)
+        price_np  = price_df.values           # (T, 3)
+        macro_np  = macro_df.values           # (T, Dm)
+        news_np   = news_df.values            # (T, 1024)
+        return_np = return_df.values          # (T, 1)
 
         # ==========================
         # WINDOWING
         # ==========================
         price_win = self.make_window(price_np, window_size)
         macro_win = self.make_window(macro_np, window_size)
+        news_win  = self.make_window(news_np, window_size)
 
-        # ❗ LABEL = RETURN SAU WINDOW (KHÔNG LEAK)
+        # LABEL = future return (NO LEAK)
         label_raw = return_np[window_size - 1 + future_days:]
 
         price_win = price_win[:-future_days]
         macro_win = macro_win[:-future_days]
+        news_win  = news_win[:-future_days]
+
+        assert len(price_win) == len(macro_win) == len(news_win) == len(label_raw), \
+            "❌ Window length mismatch"
 
         # ==========================
         # SPLIT (TIME-SERIES SAFE)
@@ -122,8 +163,15 @@ class data_prepare:
         # MACRO NORMALIZATION (TRAIN ONLY)
         # ==========================
         macro_mean = macro_win[:split_idx].mean(axis=(0, 1), keepdims=True)
-        macro_std = macro_win[:split_idx].std(axis=(0, 1), keepdims=True) + 1e-6
-        macro_win = (macro_win - macro_mean) / macro_std
+        macro_std  = macro_win[:split_idx].std(axis=(0, 1), keepdims=True) + 1e-6
+        macro_win  = (macro_win - macro_mean) / macro_std
+
+        # ==========================
+        # NEWS NORMALIZATION (TRAIN ONLY)
+        # ==========================
+        news_mean = news_win[:split_idx].mean(axis=(0, 1), keepdims=True)
+        news_std  = news_win[:split_idx].std(axis=(0, 1), keepdims=True) + 1e-6
+        news_win  = (news_win - news_mean) / news_std
 
         # ==========================
         # TORCH TENSORS
@@ -133,6 +181,7 @@ class data_prepare:
             "s_h": torch.tensor(price_win[:split_idx, :, 1:2], dtype=torch.float32),
             "s_c": torch.tensor(price_win[:split_idx, :, 2:3], dtype=torch.float32),
             "s_m": torch.tensor(macro_win[:split_idx], dtype=torch.float32),
+            "s_n": torch.tensor(news_win[:split_idx], dtype=torch.float32),
             "label": torch.tensor(label_all[:split_idx], dtype=torch.long),
         }
 
@@ -141,6 +190,7 @@ class data_prepare:
             "s_h": torch.tensor(price_win[split_idx:, :, 1:2], dtype=torch.float32),
             "s_c": torch.tensor(price_win[split_idx:, :, 2:3], dtype=torch.float32),
             "s_m": torch.tensor(macro_win[split_idx:], dtype=torch.float32),
+            "s_n": torch.tensor(news_win[split_idx:], dtype=torch.float32),
             "label": torch.tensor(label_all[split_idx:], dtype=torch.long),
         }
 

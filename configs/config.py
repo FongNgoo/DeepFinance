@@ -18,3 +18,6 @@ class TrainConfig:
     epoch_num = 100
     learning_rate = 1e-4
     weight_decay = 1e-5
+
+    # early stopping
+    early_stop_patience = 50
