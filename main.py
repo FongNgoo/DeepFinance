@@ -104,8 +104,9 @@ def train_model(train_data, val_data=None):
         if mcc > best_val_mcc:
             best_val_mcc = mcc  # <--- Updating the tracker (Crucial Fix)
             best_val_acc = acc  # <--- Save the ACC that corresponds to this MCC
-            torch.save(model.state_dict(), best_path)
-            print(f"   >>> ✅ Best Model Updated ({eval_type} MCC: {best_val_mcc:.4f})")
+    
+    torch.save(model.state_dict(), best_path)
+    print(f"   >>> ✅ Best Model Updated ({eval_type} MCC: {best_val_mcc:.4f})")
 
     print(f"\nFINAL RESULT → BEST MCC: {best_val_mcc:.4f}, ACC: {best_val_acc:.4f}")
 
